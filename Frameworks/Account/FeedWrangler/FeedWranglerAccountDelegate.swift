@@ -7,6 +7,7 @@
 //
 
 import Articles
+import Combine
 import RSCore
 import RSParser
 import RSWeb
@@ -31,6 +32,8 @@ final class FeedWranglerAccountDelegate: AccountDelegate {
 	private let caller: FeedWranglerAPICaller
 	private let log = OSLog(subsystem: Bundle.main.bundleIdentifier!, category: "Feed Wrangler")
 	private let database: SyncDatabase
+	
+	private var activeOperation: AnyCancellable?
 	
 	init(dataFolder: String, transport: Transport?) {
 		if let transport = transport {
@@ -61,64 +64,19 @@ final class FeedWranglerAccountDelegate: AccountDelegate {
 	}
 	
 	func refreshAll(for account: Account, completion: @escaping (Result<Void, Error>) -> Void) {
-		refreshProgress.addToNumberOfTasksAndRemaining(6)
-		
-		self.refreshCredentials(for: account) {
-			self.refreshProgress.completeTask()
-			self.refreshSubscriptions(for: account) { result in
-				self.refreshProgress.completeTask()
-				
-				switch result {
-				case .success:
-					self.sendArticleStatus(for: account) { result in
-						self.refreshProgress.completeTask()
-						
-						switch result {
-						case .success:
-							self.refreshArticleStatus(for: account) { result in
-								self.refreshProgress.completeTask()
-								
-								switch result {
-								case .success:
-									self.refreshArticles(for: account) { result in
-										self.refreshProgress.completeTask()
-										
-										switch result {
-										case .success:
-											self.refreshMissingArticles(for: account) { result in
-												self.refreshProgress.completeTask()
-												
-												switch result {
-												case .success:
-													DispatchQueue.main.async {
-														completion(.success(()))
-													}
-												
-												case .failure(let error):
-													completion(.failure(error))
-												}
-											}
-										
-										case .failure(let error):
-											completion(.failure(error))
-										}
-									}
-								
-								case .failure(let error):
-									completion(.failure(error))
-								}
-							}
-						
-						case .failure(let error):
-							completion(.failure(error))
-						}
-					}
-				
-				case .failure(let error):
+		self.activeOperation = self.refreshCredentials(for: account)
+			.flatMap { self.refreshSubscriptions(for: account) }
+			.flatMap { self.sendArticleStatus(for: account) }
+			.flatMap { self.refreshArticleStatus(for: account) }
+			.flatMap { self.refreshArticles(for: account) }
+			.flatMap { self.refreshMissingArticles(for: account) }
+			.sink(receiveCompletion: { results in
+				if case .failure(let error) = results {
 					completion(.failure(error))
+				} else {
+					completion(.success(()))
 				}
-			}
-		}
+			}, receiveValue: { _ in})
 	}
 	
 	func refreshCredentials(for account: Account, completion: @escaping (() -> Void)) {
@@ -126,6 +84,13 @@ final class FeedWranglerAccountDelegate: AccountDelegate {
 		// MARK: TODO
 		credentials = try? account.retrieveCredentials(type: .feedWranglerToken)
 		completion()
+	}
+	
+	func refreshCredentials(for account: Account) -> AnyPublisher<Void, Error> {
+		return Future<Void, Error> { promise in
+			self.refreshCredentials(for: account) { promise(.success(())) }
+		}.receive(on: RunLoop.main)
+		.eraseToAnyPublisher()
 	}
 	
 	func refreshSubscriptions(for account: Account, completion: @escaping ((Result<Void, Error>) -> Void)) {
@@ -142,6 +107,20 @@ final class FeedWranglerAccountDelegate: AccountDelegate {
 			}
 			
 		}
+	}
+	
+	func refreshSubscriptions(for account: Account) -> AnyPublisher<Void, Error> {
+		return Future<Void, Error> { promise in
+			self.refreshSubscriptions(for: account) { result in
+				switch result {
+				case .success:
+					promise(.success(()))
+				case .failure (let error):
+					promise(.failure(error))
+				}
+			}
+		}.receive(on: RunLoop.main)
+		.eraseToAnyPublisher()
 	}
 	
 	func refreshArticles(for account: Account, page: Int = 0, completion: @escaping ((Result<Void, Error>) -> Void)) {
@@ -162,6 +141,20 @@ final class FeedWranglerAccountDelegate: AccountDelegate {
 				completion(.failure(error))
 			}
 		}
+	}
+	
+	func refreshArticles(for account: Account, page: Int = 0) -> AnyPublisher<Void, Error> {
+		return Future<Void, Error> { promise in
+			self.refreshArticles(for: account, page: page) { result in
+				switch result {
+				case .success:
+					promise(.success(()))
+				case .failure(let error):
+					promise(.failure(error))
+				}
+			}
+		}.receive(on: RunLoop.main)
+		.eraseToAnyPublisher()
 	}
 	
 	func refreshMissingArticles(for account: Account, completion: @escaping ((Result<Void, Error>)-> Void)) {
@@ -207,6 +200,20 @@ final class FeedWranglerAccountDelegate: AccountDelegate {
 		}
 	}
 	
+	func refreshMissingArticles(for account: Account) -> AnyPublisher<Void, Error> {
+		return Future<Void, Error> { promise in
+			self.refreshMissingArticles(for: account) { result in
+				switch result {
+				case .success:
+					promise(.success(()))
+				case .failure (let error):
+					promise(.failure(error))
+				}
+			}
+		}.receive(on: RunLoop.main)
+		.eraseToAnyPublisher()
+	}
+
 	func sendArticleStatus(for account: Account, completion: @escaping VoidResultCompletionBlock) {
 		os_log(.debug, log: log, "Sending article status...")
 
@@ -236,6 +243,20 @@ final class FeedWranglerAccountDelegate: AccountDelegate {
 				completion(.failure(databaseError))
 			}
 		}
+	}
+	
+	func sendArticleStatus(for account: Account) -> AnyPublisher<Void, Error> {
+		return Future<Void, Error> { promise in
+			self.sendArticleStatus(for: account) { result in
+				switch result {
+				case .success:
+					promise(.success(()))
+				case .failure(let error):
+					promise(.failure(error))
+				}
+			}
+		}.receive(on: RunLoop.main)
+		.eraseToAnyPublisher()
 	}
 	
 	func refreshArticleStatus(for account: Account, completion: @escaping ((Result<Void, Error>) -> Void)) {
@@ -273,6 +294,20 @@ final class FeedWranglerAccountDelegate: AccountDelegate {
 			os_log(.debug, log: self.log, "Done refreshing article statuses.")
 			completion(.success(()))
 		}
+	}
+	
+	func refreshArticleStatus(for account: Account) -> AnyPublisher<Void, Error> {
+		return Future<Void, Error> { promise in
+			self.refreshArticleStatus(for: account) { result in
+				switch result {
+				case .success:
+					promise(.success(()))
+				case .failure(let error):
+					promise(.failure(error))
+				}
+			}
+		}.receive(on: RunLoop.main)
+		.eraseToAnyPublisher()
 	}
 	
 	func importOPML(for account: Account, opmlFile: URL, completion: @escaping (Result<Void, Error>) -> Void) {
